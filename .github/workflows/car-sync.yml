@@ -1,0 +1,26 @@
+name: Car auction -> Notion
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # кожні 30 хвилин
+  workflow_dispatch: {}       # кнопка «Run workflow» для ручного запуску
+
+concurrency:
+  group: car-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Sync purchases to Notion
+        env:
+          AUCTION_API_KEY: ${{ secrets.AUCTION_API_KEY }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          SINCE: ${{ vars.SINCE }}
+        run: python car_sync.py
