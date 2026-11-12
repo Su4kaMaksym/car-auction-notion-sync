@@ -2,8 +2,12 @@ name: Car auction -> Notion
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # кожні 30 хвилин
+    - cron: "*/5 * * * *"    # кожні 5 хвилин
   workflow_dispatch: {}       # кнопка «Run workflow» для ручного запуску
+
+permissions:
+  contents: read
+  actions: write              # щоб тримати розклад увімкненим (keepalive)
 
 concurrency:
   group: car-sync
@@ -24,3 +28,13 @@ jobs:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           SINCE: ${{ vars.SINCE }}
         run: python car_sync.py
+      # GitHub вимикає розклад у публічних репозиторіях після 60 днів без змін.
+      # Раз на день повторно вмикаємо workflow, щоб він не зупинився.
+      - name: Keepalive
+        if: github.event_name == 'schedule' && github.event.schedule == '*/5 * * * *'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$(date -u +%H%M)" \< "0005" ]; then
+            gh api -X PUT "repos/${{ github.repository }}/actions/workflows/car-sync.yml/enable"
+          fi
