@@ -136,8 +136,10 @@ def main():
         vin = (p.get("vin") or "").strip().upper()
         if not vin or vin in have:
             continue
-        print(f"{'[DRY] ' if dry else ''}+ {car_name(p)} | {vin} | {month_label(p)}")
-        if not dry:
+        # Логи публічні, тому без назви авто й VIN
+        if dry:
+            print(f"[DRY] + {car_name(p)} | {vin} | {month_label(p)}")
+        else:
             create_row(token, p)
         have.add(vin)
         added += 1
