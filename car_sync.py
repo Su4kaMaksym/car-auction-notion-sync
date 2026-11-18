@@ -12,7 +12,7 @@
   NOTION_TOKEN      токен інтеграції Notion (обов'язково)
   SINCE             дата у форматі YYYY-MM-DD, з якої брати покупки (обов'язково)
   AUCTION_BASE_URL  за замовчуванням https://integration.car-auctions.com.ua
-  NOTION_DB_ID      за замовчуванням база «Автомобілі — копія для API»
+  NOTION_DB_ID      ID баз через кому; за замовчуванням «Автомобілі» і «Автомобілі — копія для API»
   DRY_RUN=1         лише показати, що буде додано, нічого не записувати
 """
 import json
@@ -26,7 +26,11 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 BASE_URL = os.environ.get("AUCTION_BASE_URL", "https://integration.car-auctions.com.ua").rstrip("/")
-DB_ID = os.environ.get("NOTION_DB_ID", "416ce9d6-871f-81f4-a93b-ef454ff2a38d")
+DB_IDS = [x.strip() for x in os.environ.get(
+    "NOTION_DB_ID",
+    "20970ca2-4c28-49cd-83f1-ebee898a6b81,"   # Автомобілі (основна)
+    "416ce9d6-871f-81f4-a93b-ef454ff2a38d",   # Автомобілі — копія для API
+).split(",") if x.strip()]
 KYIV = ZoneInfo("Europe/Kyiv")
 MONTHS = ["Січень", "Лютий", "Березень", "Квітень", "Травень", "Червень",
           "Липень", "Серпень", "Вересень", "Жовтень", "Листопад", "Грудень"]
@@ -74,13 +78,13 @@ def notion(token):
     return {"Authorization": f"Bearer {token}", "Notion-Version": "2022-06-28"}
 
 
-def existing_vins(token):
+def existing_vins(token, db_id):
     vins, cursor = set(), None
     while True:
         body = {"page_size": 100}
         if cursor:
             body["start_cursor"] = cursor
-        d = http(f"https://api.notion.com/v1/databases/{DB_ID}/query", notion(token), body)
+        d = http(f"https://api.notion.com/v1/databases/{db_id}/query", notion(token), body)
         for row in d["results"]:
             v = "".join(t["plain_text"] for t in row["properties"][P_VIN]["rich_text"])
             if v.strip():
@@ -111,9 +115,9 @@ def car_name(p):
     return name or "Без назви"
 
 
-def create_row(token, p):
+def create_row(token, db_id, p):
     body = {
-        "parent": {"database_id": DB_ID},
+        "parent": {"database_id": db_id},
         "properties": {
             P_CAR: {"title": [{"text": {"content": car_name(p)}}]},
             P_VIN: {"rich_text": [{"text": {"content": p["vin"].strip().upper()}}]},
@@ -130,21 +134,21 @@ def main():
     dry = os.environ.get("DRY_RUN") == "1"
 
     purchases = fetch_purchases(api_key, since)
-    have = existing_vins(token)
-    added = 0
-    for p in purchases:
-        vin = (p.get("vin") or "").strip().upper()
-        if not vin or vin in have:
-            continue
-        # Логи публічні, тому без назви авто й VIN
-        if dry:
-            print(f"[DRY] + {car_name(p)} | {vin} | {month_label(p)}")
-        else:
-            create_row(token, p)
-        have.add(vin)
-        added += 1
-    print(f"Покупок з {since}: {len(purchases)}; додано нових: {added}")
-
+    for n, db_id in enumerate(DB_IDS, 1):
+        have = existing_vins(token, db_id)
+        added = 0
+        for p in purchases:
+            vin = (p.get("vin") or "").strip().upper()
+            if not vin or vin in have:
+                continue
+            # Логи публічні, тому без назви авто й VIN
+            if dry:
+                print(f"[DRY] база {n}: + {car_name(p)} | {vin} | {month_label(p)}")
+            else:
+                create_row(token, db_id, p)
+            have.add(vin)
+            added += 1
+        print(f"База {n}: покупок з {since}: {len(purchases)}; додано нових: {added}")
 
 if __name__ == "__main__":
     main()
