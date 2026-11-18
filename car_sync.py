@@ -58,7 +58,7 @@ def http(url, headers, body=None, method=None):
 
 
 def fetch_purchases(api_key, since):
-    """Усі покупки (свої й субдилерів), створені з дати since."""
+    """Усі покупки (свої й субдилерів), створені з дати since; субдилерів відсікає main()."""
     out, skip = [], 0
     while True:
         q = urllib.parse.urlencode({
@@ -141,6 +141,8 @@ def main():
             vin = (p.get("vin") or "").strip().upper()
             if not vin or vin in have:
                 continue
+            if p.get("ownership") == "sub_dealer":   # авто субдилера (Західавто) не додаємо
+                continue
             # Логи публічні, тому без назви авто й VIN
             if dry:
                 print(f"[DRY] база {n}: + {car_name(p)} | {vin} | {month_label(p)}")
@@ -149,6 +151,7 @@ def main():
             have.add(vin)
             added += 1
         print(f"База {n}: покупок з {since}: {len(purchases)}; додано нових: {added}")
+
 
 if __name__ == "__main__":
     main()
