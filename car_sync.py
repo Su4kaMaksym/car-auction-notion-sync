@@ -13,6 +13,8 @@
   SINCE             дата у форматі YYYY-MM-DD, з якої брати покупки (обов'язково)
   AUCTION_BASE_URL  за замовчуванням https://integration.car-auctions.com.ua
   NOTION_DB_ID      ID баз через кому; за замовчуванням «Автомобілі» і «Автомобілі — копія для API»
+  DETAIL_DB_IDS     бази, де за VIN оновлюються «Дата покупки» і «Контейнер»
+                    (за замовчуванням «Автомобілі» і «Логістика — авто»)
   DRY_RUN=1         лише показати, що буде додано, нічого не записувати
 """
 import json
@@ -31,6 +33,12 @@ DB_IDS = [x.strip() for x in os.environ.get(
     "20970ca2-4c28-49cd-83f1-ebee898a6b81,"   # Автомобілі (основна)
     "416ce9d6-871f-81f4-a93b-ef454ff2a38d",   # Автомобілі — копія для API
 ).split(",") if x.strip()]
+DETAIL_DB_IDS = [x.strip() for x in os.environ.get(
+    "DETAIL_DB_IDS",
+    "20970ca2-4c28-49cd-83f1-ebee898a6b81,"   # Автомобілі (основна)
+    "1a20c21d-bbc9-4287-b322-691308ced705",   # Логістика — авто
+).split(",") if x.strip()]
+P_BOUGHT, P_CONTAINER = "Дата покупки", "Контейнер"
 KYIV = ZoneInfo("Europe/Kyiv")
 MONTHS = ["Січень", "Лютий", "Березень", "Квітень", "Травень", "Червень",
           "Липень", "Серпень", "Вересень", "Жовтень", "Листопад", "Грудень"]
@@ -57,16 +65,14 @@ def http(url, headers, body=None, method=None):
             raise RuntimeError(f"{method or 'GET'} {url.split('?')[0]} -> {e.code}: {e.read()[:500].decode(errors='replace')}")
 
 
-def fetch_purchases(api_key, since):
-    """Усі покупки (свої й субдилерів), створені з дати since; субдилерів відсікає main()."""
+def fetch_purchases(api_key, since=None):
+    """Покупки (свої й субдилерів), створені з дати since (або всі); субдилерів відсікає main()."""
     out, skip = [], 0
     while True:
-        q = urllib.parse.urlencode({
-            "createdAt[$gte]": since,
-            "$sort[createdAt]": 1,
-            "$limit": 50,
-            "$skip": skip,
-        })
+        params = {"$sort[createdAt]": 1, "$limit": 50, "$skip": skip}
+        if since:
+            params["createdAt[$gte]"] = since
+        q = urllib.parse.urlencode(params)
         page = http(f"{BASE_URL}/purchases?{q}", {"x-api-key": api_key})
         out.extend(page["data"])
         skip += 50
@@ -108,6 +114,66 @@ def month_label(p):
     return f"{MONTHS[dt.month - 1]} {dt.year % 100:02d}"
 
 
+def kyiv_date(p):
+    """Дата покупки (YYYY-MM-DD) за київським часом."""
+    raw = p.get("date") or p.get("createdAt")
+    dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(KYIV).date().isoformat()
+
+
+def text_of(prop):
+    return "".join(t["plain_text"] for t in (prop or {}).get("rich_text", [])).strip()
+
+
+def query_all(token, db_id):
+    rows, cursor = [], None
+    while True:
+        body = {"page_size": 100}
+        if cursor:
+            body["start_cursor"] = cursor
+        d = http(f"https://api.notion.com/v1/databases/{db_id}/query", notion(token), body)
+        rows += d["results"]
+        if not d["has_more"]:
+            return rows
+        cursor = d["next_cursor"]
+
+
+def sync_details(token, db_id, name, purchases, dry):
+    """Ставить дату покупки й номер контейнера з аукціону в рядки бази (за VIN).
+    Контейнер лише дописується/оновлюється, але не стирається (після прибуття API його не віддає)."""
+    db = http(f"https://api.notion.com/v1/databases/{db_id}", notion(token))
+    missing = {k: v for k, v in ((P_BOUGHT, {"date": {}}), (P_CONTAINER, {"rich_text": {}}))
+               if k not in db["properties"]}
+    if missing and not dry:
+        http(f"https://api.notion.com/v1/databases/{db_id}", notion(token),
+             {"properties": missing}, method="PATCH")
+    by_vin = {p["vin"].strip().upper(): p for p in purchases if p.get("vin")}
+    changed = 0
+    for row in query_all(token, db_id):
+        props = row["properties"]
+        p = by_vin.get(text_of(props.get(P_VIN)).upper())
+        if not p:
+            continue
+        upd = {}
+        bought = kyiv_date(p)
+        if ((props.get(P_BOUGHT) or {}).get("date") or {}).get("start") != bought:
+            upd[P_BOUGHT] = {"date": {"start": bought}}
+        cont = ((p.get("currentDeliveryStatus") or {}).get("container_number") or "").strip()
+        if cont and text_of(props.get(P_CONTAINER)) != cont:
+            upd[P_CONTAINER] = {"rich_text": [{"text": {"content": cont}}]}
+        if not upd:
+            continue
+        if dry:
+            print(f"[DRY] {name}: {text_of(props.get(P_VIN))} -> {list(upd)}")
+        else:
+            http(f"https://api.notion.com/v1/pages/{row['id']}", notion(token),
+                 {"properties": upd}, method="PATCH")
+        changed += 1
+    print(f"{name}: оновлено дату/контейнер у рядках: {changed}")
+
+
 def car_name(p):
     name = (p.get("title") or "").strip()
     if not name:
@@ -133,7 +199,8 @@ def main():
         sys.exit("Потрібні змінні AUCTION_API_KEY, NOTION_TOKEN і SINCE (YYYY-MM-DD)")
     dry = os.environ.get("DRY_RUN") == "1"
 
-    purchases = fetch_purchases(api_key, since)
+    all_purchases = fetch_purchases(api_key)
+    purchases = [p for p in all_purchases if p.get("createdAt", "") >= since]
     for n, db_id in enumerate(DB_IDS, 1):
         have = existing_vins(token, db_id)
         added = 0
@@ -151,6 +218,9 @@ def main():
             have.add(vin)
             added += 1
         print(f"База {n}: покупок з {since}: {len(purchases)}; додано нових: {added}")
+
+    for n, db_id in enumerate(DETAIL_DB_IDS, 1):
+        sync_details(token, db_id, f"Дата/контейнер, база {n}", all_purchases, dry)
 
 
 if __name__ == "__main__":
