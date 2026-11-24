@@ -17,6 +17,7 @@
   «Автомобілі» (приховані колонки) і «Логістика авто» (ручні дати не перезаписуються)
   DRY_RUN=1         лише показати, що буде додано, нічого не записувати
 """
+from http.client import HTTPException
 import json
 import os
 import sys
@@ -62,6 +63,13 @@ def http(url, headers, body=None, method=None):
                 time.sleep(2 ** attempt * 2)
                 continue
             raise RuntimeError(f"{method or 'GET'} {url.split('?')[0]} -> {e.code}: {e.read()[:500].decode(errors='replace')}")
+        except (urllib.error.URLError, HTTPException, ConnectionError, TimeoutError, ValueError):
+            # обрив з'єднання / неповна відповідь — пробуємо ще раз
+            # (крім створення рядка: повтор міг би дати дубль)
+            if attempt < 4 and not url.endswith("/v1/pages"):
+                time.sleep(2 ** attempt * 2)
+                continue
+            raise
 
 
 def fetch_purchases(api_key, since=None):
