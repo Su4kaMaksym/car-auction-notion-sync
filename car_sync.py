@@ -56,7 +56,7 @@ def http(url, headers, body=None, method=None):
         req = urllib.request.Request(url, data=data, headers=headers,
                                      method=method or ("POST" if data else "GET"))
         try:
-            with urllib.request.urlopen(req, timeout=60) as r:
+            with urllib.request.urlopen(req, timeout=30) as r:
                 return json.load(r)
         except urllib.error.HTTPError as e:
             if e.code in (429, 500, 502, 503, 504) and attempt < 4:
@@ -207,7 +207,12 @@ def main():
         sys.exit("Потрібні змінні AUCTION_API_KEY, NOTION_TOKEN і SINCE (YYYY-MM-DD)")
     dry = os.environ.get("DRY_RUN") == "1"
 
-    all_purchases = fetch_purchases(api_key)
+    try:
+        all_purchases = fetch_purchases(api_key)
+    except (urllib.error.URLError, HTTPException, ConnectionError, TimeoutError, ValueError, RuntimeError) as e:
+        # Аукціон тимчасово недоступний — нічого не губимо, наступний запуск (через 5 хв) усе підхопить
+        print(f"::warning::API аукціону недоступне, пропускаю цей запуск: {type(e).__name__}")
+        return
     purchases = [p for p in all_purchases if p.get("createdAt", "") >= since]
     for n, db_id in enumerate(DB_IDS, 1):
         have = existing_vins(token, db_id)
